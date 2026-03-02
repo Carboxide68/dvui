@@ -69,6 +69,7 @@ pub fn app_init() !void {
         dvui.Examples.demo();
 
         const endtime = try win.end(.{});
+        try impl.setCursor(win.cursorRequested());
         window.swapBuffers();
 
         // Should be placed after all rendering and after buffer swap. This is

@@ -25,7 +25,7 @@ vtx_buf: zgl.Buffer,
 program: zgl.Program,
 state: ?State,
 fb: ?dvui.TextureTarget,
-cursor: ?*zglfw.Cursor,
+cursors: std.EnumArray(zglfw.Cursor.Shape, ?*zglfw.Cursor),
 
 userKeyCallback: ?zglfw.KeyFn,
 userCharCallback: ?zglfw.CharFn,
@@ -175,7 +175,7 @@ pub fn init(gpa: std.mem.Allocator, window_: *anyopaque) @This() {
         .framebuf_map = .empty,
         .state = null,
         .fb = null,
-        .cursor = null,
+        .cursors = .initFill(null),
         .userKeyCallback = window.setKeyCallback(&glfwKeyCallback),
         .userCharCallback = window.setCharCallback(&glfwCharCallback),
         .userMouseButtonCallback = window.setMouseButtonCallback(&glfwMouseButtonCallback),
@@ -190,11 +190,16 @@ pub fn deinit(ctx: *@This()) void {
     ctx.program.delete();
     ctx.vtx_buf.delete();
     ctx.el_buf.delete();
-    if (ctx.cursor) |cur| cur.destroy();
-    var it = ctx.framebuf_map.iterator();
-    while (it.next()) |kv| {
-        kv.key_ptr.delete();
-        kv.value_ptr.delete();
+    {
+        var it = ctx.cursors.iterator();
+        while (it.next()) |cursor| if (cursor.value.*) |cur| cur.destroy();
+    }
+    {
+        var it = ctx.framebuf_map.iterator();
+        while (it.next()) |kv| {
+            kv.key_ptr.delete();
+            kv.value_ptr.delete();
+        }
     }
     ctx.framebuf_map.clearAndFree(ctx.gpa);
     ctx.arena.deinit();
@@ -329,6 +334,22 @@ pub fn drawClippedTriangles(
     zgl.disable(.scissor_test);
 }
 
+const GLTextureFormat = struct {
+    pixel_format: zgl.PixelFormat,
+    pixel_type: zgl.PixelType,
+    internal_format: zgl.TextureInternalFormat,
+};
+fn convertPixelFormat(format: dvui.enums.TexturePixelFormat) !GLTextureFormat {
+    return switch (format) {
+        .rgba_32, .rgbx_32, .rgba_8_8_8_8, .rgbx_8_8_8_8 => .{ .pixel_format = .rgba, .pixel_type = .unsigned_int_8_8_8_8, .internal_format = .rgba8 },
+        .bgra_32, .bgrx_32, .bgra_8_8_8_8, .bgrx_8_8_8_8 => .{ .pixel_format = .bgra, .pixel_type = .unsigned_int_8_8_8_8, .internal_format = .rgba8 },
+        else => {
+            log.err("Texture format {any} is currently not supported!", .{format});
+            return dvui.Backend.TextureError.TextureCreate;
+        },
+    };
+}
+
 pub fn textureCreate(
     _: *@This(),
     pixels: [*]const u8,
@@ -337,15 +358,12 @@ pub fn textureCreate(
     interpolation: dvui.enums.TextureInterpolation,
     format: dvui.enums.TexturePixelFormat,
 ) !dvui.Texture {
-    if (format != .rgba_32) {
-        log.err("textureCreate currently only supports pixel format .rgba_32", .{});
-        return dvui.Backend.TextureError.TextureCreate;
-    }
+    const tex_format = try convertPixelFormat(format);
     const tex = zgl.Texture.gen();
     tex.bind(.@"2d");
     zgl.texParameter(.@"2d", .min_filter, if (interpolation == .nearest) .nearest else .linear);
     zgl.texParameter(.@"2d", .mag_filter, if (interpolation == .nearest) .nearest else .linear);
-    zgl.textureImage2D(.@"2d", 0, .rgba8, width, height, .rgba, .unsigned_int_8_8_8_8, pixels);
+    zgl.textureImage2D(.@"2d", 0, tex_format.internal_format, width, height, tex_format.pixel_format, tex_format.pixel_type, pixels);
     zgl.bindTexture(.invalid, .@"2d");
     return .{
         .ptr = @ptrFromInt(@intFromEnum(tex)),
@@ -368,17 +386,14 @@ pub fn textureCreateTarget(
     interpolation: dvui.enums.TextureInterpolation,
     format: dvui.enums.TexturePixelFormat,
 ) !dvui.TextureTarget {
-    if (format != .rgba_32) {
-        log.err("textureCreateTarget currently only supports pixel format .rgba_32", .{});
-        return dvui.Backend.TextureError.TextureCreate;
-    }
+    const tex_format = try convertPixelFormat(format);
     const tex = zgl.Texture.gen();
     tex.bind(.@"2d");
     zgl.texParameter(.@"2d", .min_filter, if (interpolation == .nearest) .nearest else .linear);
     zgl.texParameter(.@"2d", .mag_filter, if (interpolation == .nearest) .nearest else .linear);
     zgl.texParameter(.@"2d", .wrap_s, .clamp_to_border);
     zgl.texParameter(.@"2d", .wrap_t, .clamp_to_border);
-    zgl.textureImage2D(.@"2d", 0, .rgba8, width, height, .rgba, .unsigned_int_8_8_8_8, null);
+    zgl.textureImage2D(.@"2d", 0, tex_format.internal_format, width, height, tex_format.pixel_format, tex_format.pixel_type, null);
     const framebuf = zgl.Framebuffer.gen();
     framebuf.texture2D(.draw_buffer, .color0, .@"2d", tex, 0);
     ctx.framebuf_map.put(ctx.gpa, tex, framebuf) catch |err| {
@@ -480,14 +495,13 @@ pub fn openURL(_: *@This(), _: []const u8, _: bool) !void {
     return;
 }
 
-pub fn setCursor(ctx: *@This(), cursor: dvui.enums.Cursor) void {
+pub fn setCursor(ctx: *@This(), cursor: dvui.enums.Cursor) !void {
     // Initialize all different types of cursors at start
     // of dvui, and then simply turn different ones on.
 
     if (cursor == .hidden) return ctx.window.setInputMode(.cursor, .hidden) catch error.BackendError;
     ctx.window.setInputMode(.cursor, .normal) catch return error.BackendError;
 
-    if (ctx.cursor) |cur| cur.destroy();
     const shape: zglfw.Cursor.Shape = switch (cursor) {
         .arrow => .arrow,
         .arrow_all => .resize_all,
@@ -500,11 +514,14 @@ pub fn setCursor(ctx: *@This(), cursor: dvui.enums.Cursor) void {
         .hand => .hand,
         .ibeam => .ibeam,
         .wait => .arrow, //TODO: Make a more sensible choice
+        .wait_arrow => .arrow,
 
         .hidden => unreachable,
     };
-    ctx.cursor = zglfw.createStandardCursor(shape) catch return error.BackendError;
-    ctx.window.setCursor(ctx.cursor.?);
+    if (ctx.cursors.get(shape)) |cur| ctx.window.setCursor(cur) else {
+        ctx.cursors.getPtr(shape).* = zglfw.createStandardCursor(shape) catch return error.BackendError;
+    }
+    ctx.window.setCursor(ctx.cursors.get(shape).?);
 }
 
 /// Get the preferredColorScheme if available
@@ -696,10 +713,10 @@ fn handleKeyEvent(
     const dvui_mod = blk: {
         const Mod = dvui.enums.Mod;
         var mod = Mod.none;
-        mod.combine(if (mods.shift) .lshift else .none);
-        mod.combine(if (mods.alt) .lalt else .none);
-        mod.combine(if (mods.control) .lcontrol else .none);
-        mod.combine(if (mods.super) .lcommand else .none);
+        mod.combine(if (mods.shift or key == .left_shift) .lshift else .none);
+        mod.combine(if (mods.alt or key == .left_alt) .lalt else .none);
+        mod.combine(if (mods.control or key == .left_control) .lcontrol else .none);
+        mod.combine(if (mods.super or key == .left_super) .lcommand else .none);
         break :blk mod;
     };
     if (!(dvui_window.addEventKey(.{ .action = dvui_action, .code = dvui_key, .mod = dvui_mod }) catch |err| {
@@ -892,9 +909,10 @@ pub fn main() !void {
     zgl.viewport(0, 0, @intFromFloat(size.w), @intFromFloat(size.h));
 
     while (!window.shouldClose()) {
-        impl.addAllEvents(&win);
         zgl.clearColor(0.1, 0.4, 0.25, 1.0);
         zgl.clear(.{ .color = true, .stencil = true, .depth = true });
+
+        impl.addAllEvents(&win);
         try win.begin(std.time.nanoTimestamp());
 
         var res = try app.frameFn();
@@ -906,6 +924,10 @@ pub fn main() !void {
 
         const endtime = try win.end(.{});
         if (res != .ok) break;
+
+        impl.setCursor(win.cursorRequested()) catch |err| {
+            log.err("Failed to add cursor! Err: {}", .{err});
+        };
         window.swapBuffers();
 
         impl.pollEventsTimeout(&win, endtime);
