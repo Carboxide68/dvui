@@ -1049,7 +1049,7 @@ pub fn waitTime(self: *Self, end_micros: ?u32) u32 {
     if (end_micros == null) {
         // no target, wait indefinitely for next event
         self.loop_wait_target = null;
-        //std.debug.print("  wait indef\n", .{});
+        // std.debug.print("  wait indef\n", .{});
         return std.math.maxInt(u32);
     } else if (wait_micros > 0) {
         // wait conditionally
@@ -1057,7 +1057,7 @@ pub fn waitTime(self: *Self, end_micros: ?u32) u32 {
         // flag so that we don't adjust for the target if we wake up to an event
         self.loop_wait_target = self.frame_time_ns + (@as(i128, @intCast(target)) * 1000);
         self.loop_wait_target_can_interrupt = true;
-        //std.debug.print("  wait {d:6}\n", .{wait_micros});
+        std.debug.print("  wait {d:6}\n", .{wait_micros});
         return wait_micros;
     } else {
         // trying to hit the target but ran out of time

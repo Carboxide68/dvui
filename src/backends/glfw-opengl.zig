@@ -531,7 +531,14 @@ pub fn preferredColorScheme(_: *@This()) ?dvui.enums.ColorScheme {
 
 pub fn pollEventsTimeout(_: *@This(), win: *dvui.Window, end_time: ?u32) void {
     const wt = win.waitTime(end_time);
-    zglfw.waitEventsTimeout(@max(@as(f64, @floatFromInt(wt)) / std.time.ns_per_s, 0));
+    const wt_ns: u64 = @as(u64, wt) * 1000;
+    const wt_s = @as(f64, @floatFromInt(wt)) / std.time.us_per_s;
+    var elapsed: std.time.Timer = std.time.Timer.start() catch return zglfw.pollEvents();
+    // Fix issue on Wayland where window is woken up by EGL buffer swap
+    if (events) |*ev| while (ev.items.len == 0 and elapsed.read() < wt_ns) {
+        const elapsed_s = @as(f64, @floatFromInt(elapsed.read())) / std.time.ns_per_s;
+        zglfw.waitEventsTimeout(wt_s - elapsed_s);
+    };
 }
 
 pub fn nanoTime(_: *@This()) i128 {
